@@ -1,3 +1,10 @@
-ip,hostname,brand,site
-172.29.255.80,hyd-fw,fortigate,hyderabad
-172.22.80.21,HYD-CORE-SW2,ruckus,hyderabad
+ip,hostname,brand,site,auth_type
+172.29.255.80,hyd-fw,fortigate,hyderabad,ad
+172.22.80.21,HYD-CORE-SW2,ruckus,hyderabad,ad
+172.22.80.23,hyd-agg-sw01,ruckus,hyderabad,ad
+172.22.80.20,hyd-core-sw1,ruckus,hyderabad,ad
+172.22.80.21,hyd-core-sw2,ruckus,hyderabad,ad
+172.22.80.22,hyd-dist-sw-01,ruckus,hyderabad,ad
+172.22.80.30,hyd-dist-sw-02,ruckus,hyderabad,ad
+172.22.80.100,hyd-edge-sw-01,ruckus,hyderabad,local
+172.22.80.24,hyd-tor-sw1,ruckus,hyderabad,ad

@@ -7,6 +7,7 @@ import sys
 import difflib
 import glob
 import time
+import subprocess
 from netmiko import ConnectHandler
 from concurrent.futures import ThreadPoolExecutor
 
@@ -16,25 +17,15 @@ BASE_DIR = "network_backups"
 MAX_THREADS = 10 
 
 def sanitize_config(config_text):
-    """Strips out dynamic FortiGate lines to prevent false diffs."""
-    # [cite_start]1. Remove file version/checksum and headers [cite: 1]
     config_text = re.sub(r'^#conf_file_ver=.*$', '', config_text, flags=re.M)
     config_text = re.sub(r'^#config-version=.*$', '', config_text, flags=re.M)
-
-    # [cite_start]2. Strip ALL salted encrypted passwords [cite: 3, 5, 27]
     config_text = re.sub(r'set .* ENC \S+', 'set password ENC <STRIPPED>', config_text)
-    
-    # [cite_start]3. Strip Multi-line Certificate/Key blocks [cite: 6, 9]
     config_text = re.sub(r'set (?:private-key|certificate) "-----BEGIN.*?-----END.*?"', 
                          'set security-data <STRIPPED>', config_text, flags=re.DOTALL)
-    
-    # 4. Ruckus specific: Ignore system uptime
     config_text = re.sub(r'^.*uptime is.*$', '', config_text, flags=re.M)
-    
     return config_text
 
 def cleanup_old_files(days_to_keep=30):
-    """Deletes files older than 30 days."""
     cutoff = time.time() - (days_to_keep * 86400)
     if not os.path.exists(BASE_DIR): return
     for root, dirs, files in os.walk(BASE_DIR):
@@ -43,52 +34,70 @@ def cleanup_old_files(days_to_keep=30):
             if os.path.getmtime(file_path) < cutoff:
                 os.remove(file_path)
 
-def get_device_params(row, ad_username, ad_password):
-    brand = row['brand'].lower().strip()
+def get_keychain_pass(username, service_name):
+    """Securely fetches a password from macOS Keychain."""
+    try:
+        return subprocess.check_output(
+            ['security', 'find-generic-password', '-a', username, '-s', service_name, '-w'],
+            text=True
+        ).strip()
+    except subprocess.CalledProcessError:
+        print(f"🛑 ERROR: Password for '{username}' ({service_name}) not found in Mac Keychain.")
+        print(f"Run: security add-generic-password -a \"{username}\" -s \"{service_name}\" -w \"your_password\"")
+        sys.exit(1)
+
+def get_device_params(row, ad_user, ad_pwd, local_user, local_pwd):
+    brand = row.get('brand', '').lower().strip()
+    
+    # Check if this specific switch uses Local Auth instead of AD
+    auth_type = row.get('auth_type', 'ad').lower().strip()
+    if auth_type == 'local':
+        target_user = local_user
+        target_pwd = local_pwd
+    else:
+        target_user = ad_user
+        target_pwd = ad_pwd
+
     params = {
         'device_type': 'fortinet' if brand == 'fortigate' else 'ruckus_fastiron',
         'host': row['ip'],
-        'username': ad_username,
-        'password': ad_password,
-        'secret': ad_password,
-        'conn_timeout': 30,
-        'auth_timeout': 30,
-        'banner_timeout': 30,
-        'global_delay_factor': 2,
+        'username': target_user,
+        'password': target_pwd,
+        'secret': target_pwd,
+        'global_delay_factor': 4,
+        'ssh_config_file': '~/.ssh/config' # Uses legacy crypto config if needed
     }
     if brand == 'fortigate':
         params['fast_cli'] = False
     return params
 
-def backup_device(row, ad_username, ad_password, timestamp):
+def backup_device(row, ad_user, ad_pwd, local_user, local_pwd, timestamp):
     brand = row.get('brand', 'unknown_brand').lower().strip()
     site = row.get('site', 'unknown_site').lower().strip()
     hostname = row.get('hostname', row['ip'])
     
-    # Initialize variables to prevent "not associated with a value" errors
-    save_status = "Skipped" 
+    save_status = "Skipped"
     diff_status = "No Changes"
     
     save_path = os.path.join(BASE_DIR, site, brand)
     os.makedirs(save_path, exist_ok=True)
-    params = get_device_params(row, ad_username, ad_password)
+    params = get_device_params(row, ad_user, ad_pwd, local_user, local_pwd)
+    print(f"🔍 DEBUG: {hostname} is attempting to login as '{params['username']}'")
 
     try:
         with ConnectHandler(**params) as net_connect:
-            # --- SAVE STEP ---
+            # --- SAVE/SYNC STEP ---
             if brand == 'ruckus':
                 net_connect.enable()
-                save_output = net_connect.send_command("write memory", expect_string=r"#", read_timeout=60)
-                # Successful if no error keywords appear
-                save_status = "Saved OK" if not any(x in save_output.lower() for x in ["error", "invalid"]) else "Save Error"
-            
+                save_output = net_connect.send_command("write memory", read_timeout=60)
+                save_status = "Saved OK" if not any(x in save_output.lower() for x in ["error", "invalid", "fail"]) else "Save Error"
             elif 'fortigate' in brand:
                 sync_check = net_connect.send_command("diagnose sys conf sync status")
                 save_status = "In Sync" if "in-sync" in sync_check.lower() else "Auto-saved"
 
             # --- BACKUP STEP ---
             cmd = "show full-configuration" if 'fortigate' in brand else "show running-config"
-            config_data = net_connect.send_command(cmd)
+            config_data = net_connect.send_command(cmd, read_timeout=120)
             new_config_clean = sanitize_config(config_data)
             
             # --- DIFF STEP ---
@@ -120,8 +129,14 @@ def backup_device(row, ad_username, ad_password, timestamp):
 
 def main():
     print("--- Enterprise Network Backup Tool ---")
-    user = input("Enter AD Username: ")
-    pwd = getpass.getpass("Enter AD Password: ")
+    
+    # 1. Ask for Active Directory Credentials
+    ad_user = input("Enter AD Username: ")
+    ad_pwd = getpass.getpass("Enter AD Password: ")
+    
+    # 2. Fetch Local Switch Credentials seamlessly from Keychain
+    local_user = "admin" # Update this if your local switch user is different
+    local_pwd = get_keychain_pass(local_user, "NetworkLocalAdmin")
     
     devices = []
     try:
@@ -137,7 +152,7 @@ def main():
 
     # 3. SAFETY CHECK
     print(f"\nVerifying credentials on {devices[0]['hostname']}...")
-    test_result = backup_device(devices[0], user, pwd, "VERIFY_ONLY")
+    test_result = backup_device(devices[0], ad_user, ad_pwd, local_user, local_pwd, "VERIFY_ONLY")
     
     if "FAILED" in test_result:
         print(f"\n🛑 AUTHENTICATION ERROR: {test_result}")
@@ -148,10 +163,10 @@ def main():
     # 4. Multi-threaded Execution
     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        futures = [executor.submit(backup_device, d, user, pwd, ts) for d in devices]
+        futures = [executor.submit(backup_device, d, ad_user, ad_pwd, local_user, local_pwd, ts) for d in devices]
         for f in futures:
             print(f.result())
-    
+
     # 5. Generate Summary Report
     summary_file = os.path.join(BASE_DIR, f"summary_{ts}.txt")
     with open(summary_file, "w") as f:
