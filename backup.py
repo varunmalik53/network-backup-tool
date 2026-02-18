@@ -82,7 +82,6 @@ def backup_device(row, ad_user, ad_pwd, local_user, local_pwd, timestamp):
     save_path = os.path.join(BASE_DIR, site, brand)
     os.makedirs(save_path, exist_ok=True)
     params = get_device_params(row, ad_user, ad_pwd, local_user, local_pwd)
-    print(f"🔍 DEBUG: {hostname} is attempting to login as '{params['username']}'")
 
     try:
         with ConnectHandler(**params) as net_connect:
