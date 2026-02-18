@@ -1,0 +1,3 @@
+ip,hostname,brand,site
+172.29.255.80,hyd-fw,fortigate,hyderabad
+172.22.80.21,HYD-CORE-SW2,ruckus,hyderabad

@@ -1,0 +1,12 @@
+# Ignore the actual backups and diffs
+network_backups/
+last_run.log
+error.log
+
+# Ignore Python cache and environment files
+__pycache__/
+*.pyc
+.DS_Store
+
+# Ignore the virtual environment if you use one
+venv/
